@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { db } from "@/lib/firebase";
-import { onValue, ref, update, set } from "firebase/database";
+import { onValue, ref, set, update } from "firebase/database";
 import { useEffect, useMemo, useState } from "react";
 import {
   getBogisByRoute,
@@ -21,7 +21,14 @@ import {
   SeatItem,
 } from "./data/seat-data";
 
-type SeatStateMap = Partial<Record<RouteKey, Record<string, any>>>;
+type FirebaseSeatState = {
+  occupied?: boolean;
+  name?: string | null;
+};
+
+type SeatStateMap = Partial<
+  Record<RouteKey, Record<string, Record<string, FirebaseSeatState>>>
+>;
 
 const RESET_PASSWORD = "tofaal9152";
 
@@ -29,7 +36,7 @@ const makeEmptySeats = (route: RouteKey, bogi: string) => {
   const seats = getSeatsByRouteAndBogi(route, bogi);
 
   return Object.fromEntries(
-    seats.map((seat) => [seat.seat, { occupied: false, name: null }]),
+    seats.map((seat) => [String(seat.seat), { occupied: false, name: null }]),
   );
 };
 
@@ -53,60 +60,78 @@ const getShortRouteLabel = (route: RouteKey) => {
 };
 
 export default function HomePage() {
-  const [route, setRoute] = useState<RouteKey>(routeOptions[0]);
-  const [bogi, setBogi] = useState(getBogisByRoute(routeOptions[0])[0]);
+  const initialRoute = routeOptions[0];
+  const initialBogi = getBogisByRoute(initialRoute)[0] ?? "";
+
+  const [route, setRoute] = useState<RouteKey>(initialRoute);
+  const [bogi, setBogi] = useState<string>(initialBogi);
   const [seatsState, setSeatsState] = useState<SeatStateMap>({});
   const [selectedSeat, setSelectedSeat] = useState<SeatItem | null>(null);
   const [name, setName] = useState("");
 
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetPassword, setResetPassword] = useState("");
-  const [resetRoute, setResetRoute] = useState<RouteKey>(routeOptions[0]);
-  const [resetBogi, setResetBogi] = useState(
-    getBogisByRoute(routeOptions[0])[0],
-  );
+  const [resetRoute, setResetRoute] = useState<RouteKey>(initialRoute);
+  const [resetBogi, setResetBogi] = useState<string>(initialBogi);
   const [resetError, setResetError] = useState("");
 
-  // 🔥 Realtime read
   useEffect(() => {
     const seatRef = ref(db, "seatStates");
 
     return onValue(seatRef, (snapshot) => {
       const data = snapshot.val();
-      if (data) setSeatsState(data);
+      setSeatsState(data ?? {});
     });
   }, []);
 
   const bogis = useMemo(() => getBogisByRoute(route), [route]);
-
-  const seats = useMemo(() => {
-    const firebaseSeats = seatsState?.[route]?.[bogi];
-
-    if (!firebaseSeats) {
-      return getSeatsByRouteAndBogi(route, bogi);
-    }
-
-    return Object.entries(firebaseSeats).map(([seat, data]: any) => ({
-      seat: Number(seat),
-      name: data?.name ?? null,
-      occupied: data?.occupied ?? false,
-    }));
-  }, [route, bogi, seatsState]);
-
   const resetBogis = useMemo(() => getBogisByRoute(resetRoute), [resetRoute]);
   const trainNo = useMemo(() => getTrainNoByRoute(route), [route]);
 
-  // 🔥 Firebase update
+  const seats = useMemo(() => {
+    const baseSeats = getSeatsByRouteAndBogi(route, bogi);
+    const firebaseSeats = seatsState?.[route]?.[bogi] ?? {};
+
+    return baseSeats.map((seat) => {
+      const liveSeat = firebaseSeats[String(seat.seat)];
+
+      return {
+        seat: seat.seat,
+        occupied: liveSeat?.occupied ?? false,
+        name: liveSeat?.name ?? null,
+      };
+    });
+  }, [route, bogi, seatsState]);
+
+  const handleRouteChange = (nextRoute: RouteKey) => {
+    const nextBogis = getBogisByRoute(nextRoute);
+    const firstBogi = nextBogis[0] ?? "";
+
+    setRoute(nextRoute);
+    setBogi(firstBogi);
+    setSelectedSeat(null);
+    setName("");
+  };
+
+  const handleResetRouteChange = (nextRoute: RouteKey) => {
+    const nextBogis = getBogisByRoute(nextRoute);
+    const firstBogi = nextBogis[0] ?? "";
+
+    setResetRoute(nextRoute);
+    setResetBogi(firstBogi);
+  };
+
   const updateSeatInFirebase = async (
+    currentRoute: RouteKey,
+    currentBogi: string,
     seatNo: number,
     payload: { occupied: boolean; name: string | null },
   ) => {
     await update(ref(db), {
-      [`seatStates/${route}/${bogi}/${seatNo}`]: payload,
+      [`seatStates/${currentRoute}/${currentBogi}/${seatNo}`]: payload,
     });
   };
 
-  // 🔥 Click
   const handleSeatClick = async (seat: SeatItem) => {
     if (!seat.name) {
       setSelectedSeat(seat);
@@ -118,27 +143,34 @@ export default function HomePage() {
     );
 
     if (confirmRemove) {
-      await updateSeatInFirebase(seat.seat, {
+      await updateSeatInFirebase(route, bogi, seat.seat, {
         occupied: false,
         name: null,
       });
     }
   };
 
-  // 🔥 Add name
   const handleSubmit = async () => {
-    if (!selectedSeat || !name.trim()) return;
+    const trimmedName = name.trim();
+    if (!selectedSeat || !trimmedName) return;
 
-    await updateSeatInFirebase(selectedSeat.seat, {
+    await updateSeatInFirebase(route, bogi, selectedSeat.seat, {
       occupied: true,
-      name: name.trim(),
+      name: trimmedName,
     });
 
     setSelectedSeat(null);
     setName("");
   };
 
-  // 🔥 Reset
+  const openResetDialog = () => {
+    setResetRoute(route);
+    setResetBogi(bogi);
+    setResetPassword("");
+    setResetError("");
+    setResetDialogOpen(true);
+  };
+
   const handleResetSeats = async () => {
     if (resetPassword !== RESET_PASSWORD) {
       setResetError("Invalid admin password");
@@ -156,24 +188,20 @@ export default function HomePage() {
 
   return (
     <main className="min-h-screen bg-slate-50 pb-32">
-      <div className="mx-auto max-w-6xl p-4 space-y-4">
-        <div className="bg-white p-4 rounded-xl border flex justify-between">
+      <div className="mx-auto max-w-6xl space-y-4 p-4">
+        <div className="flex justify-between rounded-xl border bg-white p-4">
           <div>
             <h1 className="font-bold">Train Seat Tracker</h1>
             <p>{route}</p>
             <p>Train: {trainNo ?? "N/A"}</p>
           </div>
 
-          <Button
-            variant="destructive"
-            onClick={() => setResetDialogOpen(true)}
-          >
+          <Button variant="destructive" onClick={openResetDialog}>
             Reset
           </Button>
         </div>
 
-        {/* Bogi */}
-        <div className="bg-white p-4 rounded-xl border flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 rounded-xl border bg-white p-4">
           {bogis.map((b) => (
             <Button
               key={b}
@@ -185,8 +213,7 @@ export default function HomePage() {
           ))}
         </div>
 
-        {/* Seats */}
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
           {seats.map((seat) => (
             <Card
               key={seat.seat}
@@ -195,7 +222,7 @@ export default function HomePage() {
                 seat.name ? "bg-red-500 text-white" : "bg-green-500 text-white"
               }`}
             >
-              <CardContent className="h-20 flex flex-col justify-center items-center">
+              <CardContent className="flex h-20 flex-col items-center justify-center">
                 <div>{seat.seat}</div>
                 <div>{seat.name ?? "Empty"}</div>
               </CardContent>
@@ -204,47 +231,105 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Add dialog */}
-      <Dialog open={!!selectedSeat} onOpenChange={() => setSelectedSeat(null)}>
+      <Dialog
+        open={!!selectedSeat}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedSeat(null);
+            setName("");
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Seat {selectedSeat?.seat}</DialogTitle>
           </DialogHeader>
 
-          <Input value={name} onChange={(e) => setName(e.target.value)} />
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Enter name"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSubmit();
+            }}
+          />
 
           <Button onClick={handleSubmit}>Confirm</Button>
         </DialogContent>
       </Dialog>
 
-      {/* Reset dialog */}
-      <Dialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+      <Dialog
+        open={resetDialogOpen}
+        onOpenChange={(open) => {
+          setResetDialogOpen(open);
+          if (!open) {
+            setResetPassword("");
+            setResetError("");
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Admin Reset</DialogTitle>
           </DialogHeader>
 
-          <Input
-            type="password"
-            value={resetPassword}
-            onChange={(e) => setResetPassword(e.target.value)}
-          />
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              {routeOptions.map((item) => (
+                <Button
+                  key={item}
+                  type="button"
+                  variant={item === resetRoute ? "default" : "outline"}
+                  onClick={() => handleResetRouteChange(item)}
+                  className="h-auto whitespace-normal px-3 py-2 text-xs"
+                >
+                  {item}
+                </Button>
+              ))}
+            </div>
 
-          {resetError && <p className="text-red-500">{resetError}</p>}
+            <div className="flex flex-wrap gap-2">
+              {resetBogis.map((item) => (
+                <Button
+                  key={item}
+                  type="button"
+                  variant={item === resetBogi ? "default" : "outline"}
+                  onClick={() => setResetBogi(item)}
+                >
+                  Bogi {item}
+                </Button>
+              ))}
+            </div>
 
-          <Button onClick={handleResetSeats}>Reset</Button>
+            <Input
+              type="password"
+              value={resetPassword}
+              placeholder="Admin password"
+              onChange={(e) => {
+                setResetPassword(e.target.value);
+                if (resetError) setResetError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleResetSeats();
+              }}
+            />
+
+            {resetError ? <p className="text-red-500">{resetError}</p> : null}
+
+            <Button variant="destructive" onClick={handleResetSeats}>
+              Reset {resetRoute} - {resetBogi}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 
-      {/* Bottom nav */}
-
-      <div className="fixed bottom-0 left-0 right-0 z-30 border-t bg-white/95 backdrop-blur supports-backdrop-filter:bg-white/80">
+      <div className="supports-[backdrop-filter]:bg-white/80 fixed bottom-0 left-0 right-0 z-30 border-t bg-white/95 backdrop-blur">
         <div className="mx-auto grid max-w-6xl grid-cols-3 gap-2 p-2 sm:grid-cols-6">
           {routeOptions.map((r) => (
             <button
               key={r}
               type="button"
-              onClick={() => setRoute(r)}
+              onClick={() => handleRouteChange(r)}
               className={`rounded-xl px-2 py-2 text-center text-[11px] font-medium transition sm:text-xs ${
                 route === r
                   ? "bg-primary text-primary-foreground"
